@@ -1,6 +1,9 @@
 node_modules/
 cdk.out/
 dist/
-*.d.ts
-*.js
-!jest.config.js
+# tsc build output for bin/ and lib/ only — lambda/ is plain JS source, not
+# compiled, and must stay tracked.
+/bin/*.js
+/bin/*.d.ts
+/lib/*.js
+/lib/*.d.ts
