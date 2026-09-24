@@ -58,7 +58,14 @@ export class LineupAnnouncerStack extends cdk.Stack {
     // That's the standard, least-privilege way to wire CI into a bootstrapped
     // CDK app: GitHub never gets broad AWS access, only "act as the same
     // deploy identity a human running `cdk deploy` locally already uses."
-    const githubRepo = "gong4494/LineupAnnouncer";
+    // GitHub now issues "immutable" OIDC subject claims: owner/repo names get
+    // a permanent numeric ID appended (repo:owner@ownerId/repo@repoId:...)
+    // instead of the plain repo:owner/repo:... form, so a renamed/transferred
+    // repo can't inherit an old trust relationship. Confirmed the exact live
+    // value via CloudTrail after the first deploy run failed against the old
+    // plain-name condition (AccessDenied: Not authorized to perform
+    // sts:AssumeRoleWithWebIdentity).
+    const githubSub = "repo:gong4494@4535701/LineupAnnouncer@1367670316:ref:refs/heads/main";
 
     const githubOidc = new iam.OidcProviderNative(this, "GitHubOidcProvider", {
       url: "https://token.actions.githubusercontent.com",
@@ -73,7 +80,7 @@ export class LineupAnnouncerStack extends cdk.Stack {
           "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
         },
         StringLike: {
-          "token.actions.githubusercontent.com:sub": `repo:${githubRepo}:ref:refs/heads/main`,
+          "token.actions.githubusercontent.com:sub": githubSub,
         },
       }),
       maxSessionDuration: cdk.Duration.hours(1),
