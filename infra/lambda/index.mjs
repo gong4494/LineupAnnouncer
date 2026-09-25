@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, GetCommand, PutCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
 import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 
 function asset(name) {
@@ -30,42 +31,46 @@ function getFishAudioKey() {
   }
   return fishAudioKeyPromise;
 }
-const ROSTER_TABLE = process.env.ROSTER_TABLE_NAME;
-const ROSTER_KEY = "roster";
 
-const DEFAULT_ROSTER = [
-  { name: "William Gong", num: 17, pos: "SS", song: "Mystical Magical — Benson Boone" },
-  { name: "Eli Brandt", num: 7, pos: "2B", song: "Jump Around — House of Pain" },
-  { name: "Tobias Kim", num: 24, pos: "CF", song: "Enter Sandman — Metallica" },
-  { name: "Dawson Pryor", num: 41, pos: "1B", song: "Wagon Wheel — Darius Rucker" },
-  { name: "Nia Okafor", num: 3, pos: "C", song: "Run This Town — Jay-Z" },
-  { name: "Cal Whitfield", num: 18, pos: "LF", song: "Sicko Mode — Travis Scott" },
-  { name: "Reese Alonzo", num: 9, pos: "3B", song: "Callaita — Bad Bunny" },
-  { name: "Sam Devries", num: 33, pos: "RF", song: "Seven Nation Army" },
-  { name: "Jonah Reyes", num: 5, pos: "P", song: "Levels — Avicii" },
-];
+// One DynamoDB item per team: { id, name, venue, players }. A Scan lists
+// every team for the home page — the table stays tiny (a handful of teams
+// at most) so a full scan is simpler and plenty fast, no GSI needed.
+const TEAMS_TABLE = process.env.ROSTER_TABLE_NAME;
 
-async function getRoster() {
-  const res = await ddb.send(new GetCommand({ TableName: ROSTER_TABLE, Key: { id: ROSTER_KEY } }));
-  if (res.Item && Array.isArray(res.Item.players)) return res.Item.players;
-  await ddb.send(new PutCommand({ TableName: ROSTER_TABLE, Item: { id: ROSTER_KEY, players: DEFAULT_ROSTER } }));
-  return DEFAULT_ROSTER;
+async function listTeams() {
+  const res = await ddb.send(new ScanCommand({ TableName: TEAMS_TABLE }));
+  return (res.Items || [])
+    .map((t) => ({ id: t.id, name: t.name, venue: t.venue || "", playerCount: (t.players || []).length }))
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
 
-async function saveRoster(players) {
-  await ddb.send(new PutCommand({ TableName: ROSTER_TABLE, Item: { id: ROSTER_KEY, players } }));
+async function createTeam({ name, venue }) {
+  const team = { id: randomUUID(), name, venue: venue || "", players: [] };
+  await ddb.send(new PutCommand({ TableName: TEAMS_TABLE, Item: team }));
+  return team;
 }
 
-const TEAM_NAME = "Pioneers";
+async function getTeam(teamId) {
+  const res = await ddb.send(new GetCommand({ TableName: TEAMS_TABLE, Key: { id: teamId } }));
+  return res.Item || null;
+}
+
+async function saveTeamRoster(teamId, players) {
+  const team = await getTeam(teamId);
+  if (!team) return null;
+  const updated = { ...team, players };
+  await ddb.send(new PutCommand({ TableName: TEAMS_TABLE, Item: updated }));
+  return updated;
+}
 
 // Fish Audio's S2 models take free-form bracket directives (delivery/emotion
 // cues and pauses) inline in the text, interpreted by the model rather than
 // spoken aloud — this replaces the old per-sentence SSML <prosody> pacing.
-function announcementText({ num, name }) {
+function announcementText({ num, name, team }) {
   const parts = name.trim().split(/\s+/);
   const last = parts.pop() || name;
   const first = parts.join(" ");
-  return `[shouting confidently like a baseball stadium public address announcer] [loud] Now batting for the ${TEAM_NAME}... [long pause] number ${num}... [pause]${first}... [emphasis]${last}!`;
+  return `[shouting confidently like a baseball stadium public address announcer] [loud] Now batting for the ${team}... [long pause] number ${num}... [pause]${first}... [emphasis]${last}!`;
 }
 
 async function speak(text) {
@@ -109,8 +114,14 @@ async function lookupPreview(songField) {
   return hit.previewUrl;
 }
 
+function readJsonBody(event) {
+  const raw = event.isBase64Encoded ? Buffer.from(event.body || "", "base64").toString("utf8") : event.body;
+  return JSON.parse(raw || "{}");
+}
+
 export const handler = async (event) => {
   const path = event.rawPath || "/";
+  const method = event.requestContext?.http?.method;
 
   const staticAsset = STATIC_ASSETS[path];
   if (staticAsset) {
@@ -122,24 +133,44 @@ export const handler = async (event) => {
     };
   }
 
-  if (path === "/api/roster") {
-    const method = event.requestContext?.http?.method;
+  if (path === "/api/teams") {
     try {
       if (method === "GET") {
-        const players = await getRoster();
-        return { statusCode: 200, headers: { "content-type": "application/json" }, body: JSON.stringify(players) };
+        return { statusCode: 200, headers: { "content-type": "application/json" }, body: JSON.stringify(await listTeams()) };
       }
-      if (method === "PUT") {
-        const raw = event.isBase64Encoded ? Buffer.from(event.body || "", "base64").toString("utf8") : event.body;
-        const players = JSON.parse(raw || "[]");
-        if (!Array.isArray(players)) return { statusCode: 400, body: "expected a JSON array" };
-        await saveRoster(players);
-        return { statusCode: 200, headers: { "content-type": "application/json" }, body: JSON.stringify(players) };
+      if (method === "POST") {
+        const { name, venue } = readJsonBody(event);
+        if (!name || !name.trim()) return { statusCode: 400, body: "missing team name" };
+        const team = await createTeam({ name: name.trim(), venue: (venue || "").trim() });
+        return { statusCode: 200, headers: { "content-type": "application/json" }, body: JSON.stringify(team) };
       }
       return { statusCode: 405, body: "method not allowed" };
     } catch (err) {
-      console.error("roster request failed", err);
-      return { statusCode: 502, body: "roster request failed" };
+      console.error("teams request failed", err);
+      return { statusCode: 502, body: "teams request failed" };
+    }
+  }
+
+  const rosterMatch = path.match(/^\/api\/teams\/([^/]+)\/roster$/);
+  if (rosterMatch) {
+    const teamId = decodeURIComponent(rosterMatch[1]);
+    try {
+      if (method === "GET") {
+        const team = await getTeam(teamId);
+        if (!team) return { statusCode: 404, body: "team not found" };
+        return { statusCode: 200, headers: { "content-type": "application/json" }, body: JSON.stringify(team.players || []) };
+      }
+      if (method === "PUT") {
+        const players = readJsonBody(event);
+        if (!Array.isArray(players)) return { statusCode: 400, body: "expected a JSON array" };
+        const team = await saveTeamRoster(teamId, players);
+        if (!team) return { statusCode: 404, body: "team not found" };
+        return { statusCode: 200, headers: { "content-type": "application/json" }, body: JSON.stringify(team.players) };
+      }
+      return { statusCode: 405, body: "method not allowed" };
+    } catch (err) {
+      console.error("team roster request failed", err);
+      return { statusCode: 502, body: "team roster request failed" };
     }
   }
 
@@ -156,10 +187,10 @@ export const handler = async (event) => {
   }
 
   if (path === "/speak") {
-    const { num, name } = event.queryStringParameters || {};
-    if (!num || !name) return { statusCode: 400, body: "missing num/name query params" };
+    const { num, name, team } = event.queryStringParameters || {};
+    if (!num || !name || !team) return { statusCode: 400, body: "missing num/name/team query params" };
     try {
-      return await speak(announcementText({ num, name }));
+      return await speak(announcementText({ num, name, team }));
     } catch (err) {
       console.error("fish audio synthesis failed", err);
       return { statusCode: 502, body: "speech synthesis failed" };
