@@ -14,7 +14,6 @@ const STATIC_ASSETS = {
   "/icons/icon-180.png": { body: asset("icons/icon-180.png"), contentType: "image/png", binary: true },
   "/icons/icon-192.png": { body: asset("icons/icon-192.png"), contentType: "image/png", binary: true },
   "/icons/icon-512.png": { body: asset("icons/icon-512.png"), contentType: "image/png", binary: true },
-  "/audio/william-gong.mp3": { body: asset("audio/william-gong.mp3"), contentType: "audio/mpeg", binary: true },
 };
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -35,7 +34,7 @@ const ROSTER_TABLE = process.env.ROSTER_TABLE_NAME;
 const ROSTER_KEY = "roster";
 
 const DEFAULT_ROSTER = [
-  { name: "William Gong", num: 17, pos: "SS", song: "Mystical Magical — Benson Boone", clip: "/audio/william-gong.mp3" },
+  { name: "William Gong", num: 17, pos: "SS", song: "Mystical Magical — Benson Boone" },
   { name: "Eli Brandt", num: 7, pos: "2B", song: "Jump Around — House of Pain" },
   { name: "Tobias Kim", num: 24, pos: "CF", song: "Enter Sandman — Metallica" },
   { name: "Dawson Pryor", num: 41, pos: "1B", song: "Wagon Wheel — Darius Rucker" },
@@ -57,26 +56,16 @@ async function saveRoster(players) {
   await ddb.send(new PutCommand({ TableName: ROSTER_TABLE, Item: { id: ROSTER_KEY, players } }));
 }
 
-// Draws out the name's final sustainable sound (a PA announcer's classic
-// flourish) — trailing vowels/sibilants/nasals get repeated; a word ending in
-// an unsustainable stop consonant (t/k/p/b/d/g) stretches its last vowel
-// instead, since you can't hold a "t" the way you can hold an "s" or "ay".
-function stretch(word) {
-  const lastChar = word.slice(-1);
-  if (/[aeiouyszmnlrfv]/i.test(lastChar)) return word + lastChar.repeat(6);
-  return word.replace(/([aeiouAEIOU])(?!.*[aeiouAEIOU])/, (v) => v.repeat(6));
-}
+const TEAM_NAME = "Pioneers";
 
-// Fish Audio has no SSML/prosody-per-segment support, just a flat text
-// string plus a single speed/volume for the whole utterance — so the
-// dramatic pacing that Polly got from per-sentence <prosody> now comes
-// entirely from punctuation and the name-stretching trick.
-function announcementText({ num, pos, name }) {
+// Fish Audio's S2 models take free-form bracket directives (delivery/emotion
+// cues and pauses) inline in the text, interpreted by the model rather than
+// spoken aloud — this replaces the old per-sentence SSML <prosody> pacing.
+function announcementText({ num, name }) {
   const parts = name.trim().split(/\s+/);
   const last = parts.pop() || name;
   const first = parts.join(" ");
-  const stretchedLast = stretch(last);
-  return `Now batting, number ${num}, ${pos}. ${first}! ${stretchedLast}!`;
+  return `[shouting confidently like a baseball stadium public address announcer] [loud] Now batting for the ${TEAM_NAME}... [long pause] number ${num}... [pause]${first}... [emphasis]${last}!`;
 }
 
 async function speak(text) {
@@ -167,10 +156,10 @@ export const handler = async (event) => {
   }
 
   if (path === "/speak") {
-    const { num, pos, name } = event.queryStringParameters || {};
-    if (!num || !pos || !name) return { statusCode: 400, body: "missing num/pos/name query params" };
+    const { num, name } = event.queryStringParameters || {};
+    if (!num || !name) return { statusCode: 400, body: "missing num/name query params" };
     try {
-      return await speak(announcementText({ num, pos, name }));
+      return await speak(announcementText({ num, name }));
     } catch (err) {
       console.error("fish audio synthesis failed", err);
       return { statusCode: 502, body: "speech synthesis failed" };
