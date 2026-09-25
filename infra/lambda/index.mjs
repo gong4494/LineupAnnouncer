@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
-import { PollyClient, SynthesizeSpeechCommand } from "@aws-sdk/client-polly";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
+import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 
 function asset(name) {
   return readFileSync(new URL(`./${name}`, import.meta.url));
@@ -17,8 +17,20 @@ const STATIC_ASSETS = {
   "/audio/william-gong.mp3": { body: asset("audio/william-gong.mp3"), contentType: "audio/mpeg", binary: true },
 };
 
-const polly = new PollyClient({});
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ssm = new SSMClient({});
+const FISH_AUDIO_KEY_PARAM = "/lineup-announcer/fish-audio-api-key";
+const FISH_AUDIO_VOICE_ID = "29e4b6f5c8ea4db8bbcfb7ca9720bc6c";
+
+let fishAudioKeyPromise;
+function getFishAudioKey() {
+  if (!fishAudioKeyPromise) {
+    fishAudioKeyPromise = ssm
+      .send(new GetParameterCommand({ Name: FISH_AUDIO_KEY_PARAM, WithDecryption: true }))
+      .then((r) => r.Parameter.Value);
+  }
+  return fishAudioKeyPromise;
+}
 const ROSTER_TABLE = process.env.ROSTER_TABLE_NAME;
 const ROSTER_KEY = "roster";
 
@@ -45,15 +57,6 @@ async function saveRoster(players) {
   await ddb.send(new PutCommand({ TableName: ROSTER_TABLE, Item: { id: ROSTER_KEY, players } }));
 }
 
-function escapeXml(text) {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
-}
-
 // Draws out the name's final sustainable sound (a PA announcer's classic
 // flourish) — trailing vowels/sibilants/nasals get repeated; a word ending in
 // an unsustainable stop consonant (t/k/p/b/d/g) stretches its last vowel
@@ -64,38 +67,41 @@ function stretch(word) {
   return word.replace(/([aeiouAEIOU])(?!.*[aeiouAEIOU])/, (v) => v.repeat(6));
 }
 
-function announcementSsml({ num, pos, name }) {
+// Fish Audio has no SSML/prosody-per-segment support, just a flat text
+// string plus a single speed/volume for the whole utterance — so the
+// dramatic pacing that Polly got from per-sentence <prosody> now comes
+// entirely from punctuation and the name-stretching trick.
+function announcementText({ num, pos, name }) {
   const parts = name.trim().split(/\s+/);
   const last = parts.pop() || name;
   const first = parts.join(" ");
   const stretchedLast = stretch(last);
-
-  // Generative voices only allow <prosody> around a *complete* sentence, so
-  // each clause is wrapped in its own <s> to give prosody a full one to grab.
-  return `<speak>
-    <prosody rate="110%" volume="loud"><s>Now batting, number ${escapeXml(num)}, ${escapeXml(pos)}.</s></prosody>
-    <break time="250ms"/>
-    <prosody volume="x-loud"><s>${escapeXml(first)}.</s></prosody>
-    <break time="150ms"/>
-    <prosody volume="x-loud" rate="60%"><s>${escapeXml(stretchedLast)}!</s></prosody>
-  </speak>`;
+  return `Now batting, number ${num}, ${pos}. ${first}! ${stretchedLast}!`;
 }
 
-async function speak(ssml) {
-  const result = await polly.send(
-    new SynthesizeSpeechCommand({
-      Text: ssml,
-      TextType: "ssml",
-      OutputFormat: "mp3",
-      VoiceId: "Matthew",
-      Engine: "generative",
+async function speak(text) {
+  const apiKey = await getFishAudioKey();
+  const res = await fetch("https://api.fish.audio/v1/tts", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${apiKey}`,
+      "content-type": "application/json",
+      model: "s2.1-pro-free",
+    },
+    body: JSON.stringify({
+      text,
+      reference_id: FISH_AUDIO_VOICE_ID,
+      format: "mp3",
+      mp3_bitrate: 128,
+      prosody: { speed: 1.0, volume: 0 },
     }),
-  );
-  const bytes = await result.AudioStream.transformToByteArray();
+  });
+  if (!res.ok) throw new Error(`fish audio error ${res.status}: ${await res.text()}`);
+  const bytes = Buffer.from(await res.arrayBuffer());
   return {
     statusCode: 200,
     headers: { "content-type": "audio/mpeg" },
-    body: Buffer.from(bytes).toString("base64"),
+    body: bytes.toString("base64"),
     isBase64Encoded: true,
   };
 }
@@ -164,9 +170,9 @@ export const handler = async (event) => {
     const { num, pos, name } = event.queryStringParameters || {};
     if (!num || !pos || !name) return { statusCode: 400, body: "missing num/pos/name query params" };
     try {
-      return await speak(announcementSsml({ num, pos, name }));
+      return await speak(announcementText({ num, pos, name }));
     } catch (err) {
-      console.error("polly synthesis failed", err);
+      console.error("fish audio synthesis failed", err);
       return { statusCode: 502, body: "speech synthesis failed" };
     }
   }

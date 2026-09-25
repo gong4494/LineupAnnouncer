@@ -34,11 +34,20 @@ export class LineupAnnouncerStack extends cdk.Stack {
 
     table.grantReadWriteData(fn);
 
-    // Polly has no resource-level permissions for SynthesizeSpeech.
+    // The Fish Audio API key lives in SSM (SecureString), read once per cold
+    // start. kms:Decrypt is scoped via ViaService rather than to a specific
+    // key ARN since the default aws/ssm key's ARN isn't known ahead of time.
     fn.addToRolePolicy(
       new iam.PolicyStatement({
-        actions: ["polly:SynthesizeSpeech"],
+        actions: ["ssm:GetParameter"],
+        resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter/lineup-announcer/fish-audio-api-key`],
+      }),
+    );
+    fn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["kms:Decrypt"],
         resources: ["*"],
+        conditions: { StringEquals: { "kms:ViaService": `ssm.${this.region}.amazonaws.com` } },
       }),
     );
 
