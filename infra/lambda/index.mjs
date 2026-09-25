@@ -19,7 +19,7 @@ const STATIC_ASSETS = {
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const ssm = new SSMClient({});
 const FISH_AUDIO_KEY_PARAM = "/lineup-announcer/fish-audio-api-key";
-const FISH_AUDIO_VOICE_ID = "29e4b6f5c8ea4db8bbcfb7ca9720bc6c";
+const FISH_AUDIO_VOICE_ID = "f3199d67940c4ef3a029a5baf92ee8c2";
 
 let fishAudioKeyPromise;
 function getFishAudioKey() {
